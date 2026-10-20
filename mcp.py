@@ -132,3 +132,30 @@ def calculator(args):
         "content": [{"type": "text", "text": proc.stdout.strip()}],
         "isError": False,
     }
+
+def timer(args):
+    """Yields progress dicts along the way; the final yield is the result."""
+    alarm = args.get("alarm")
+
+    # bool is a subclass of int, so exclude it explicitly
+    if isinstance(alarm, bool) or not isinstance(alarm, int) or alarm <= 0:
+        yield {
+            "resultType": "complete",
+            "content": [{"type": "text",
+                         "text": "Require 'alarm' argument as a positive integer number of seconds"}],
+            "isError": True,
+        }
+        return
+
+    elapsed = 0
+    while elapsed + 10 < alarm:
+        time.sleep(10)
+        elapsed += 10
+        yield {"progress": elapsed, "total": alarm}
+
+    time.sleep(alarm - elapsed)
+    yield {
+        "resultType": "complete",
+        "content": [{"type": "text", "text": f"Time's up! {alarm} seconds elapsed."}],
+        "isError": False,
+    }

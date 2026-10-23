@@ -5,14 +5,14 @@ import base64
 import datetime
 import subprocess
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
- 
+
 PROTOCOL_VERSION = "2026-07-28"
-SERVER_INFO = {"name": "csee4119-mcp", "version": "1.0.0"}
+SERVER_INFO = {"name": "project1_mcp", "version": "1.0.0"}
 ENDPOINT = "/mcp"
- 
+
 HOST = os.environ.get("MCP_HOST", "127.0.0.1")
 PORT = int(os.environ.get("MCP_PORT", "5210"))
- 
+
 META_VERSION = "io.modelcontextprotocol/protocolVersion"
 META_CAPS = "io.modelcontextprotocol/clientCapabilities"
 
@@ -20,255 +20,250 @@ DEFAULT_ORIGINS = {
     "http://localhost", "https://localhost",
     "http://127.0.0.1", "https://127.0.0.1",
 }
-EXTRA_ORIGINS = {o.strip() for o in os.environ.get("MCP_ALLOWED_ORIGINS", "").split(",") if o.strip()}
+
+EXTRA_ORIGINS = {
+    o.strip() for o in os.environ.get("MCP_ALLOWED_ORIGINS", "").split(",")
+    if o.strip()
+}
 
 TOOLS = [
     {
         "name": "today",
         "title": "Today's date",
-        "description": "Return today's date with a specified format argument that adheres to the Python strftime() format.",
+        "description": "Return today's date with a specified Python strftime format.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "format": {"type": "string", "description": "provide a format that adheres to Python strftime() format"}
+                "format": {
+                    "type": "string",
+                    "description": "Python strftime format"
+                }
             },
-            "required": ["format"],
-        },
+            "required": ["format"]
+        }
     },
     {
         "name": "weekday",
         "title": "Weekday of a given date",
-        "description": "Return the weekday for a date provided in the date argument.",
+        "description": "Return the weekday for a given date.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "date": {"type": "string", "description": "provide the date"}
+                "date": {
+                    "type": "string",
+                    "description": "Date in YYYY-MM-DD format"
+                }
             },
-            "required": ["date"],
-        },
+            "required": ["date"]
+        }
     },
     {
         "name": "timer",
         "title": "Egg timer",
-        "description": "A simple “egg timer” that sends an update every ten seconds and an alarm. The argument alarm specifies the number of seconds until the alarm.",
+        "description": "Send progress every 10 seconds until the alarm.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "alarm": {"type": "integer", "description": "the number of seconds until the alarm."}
+                "alarm": {
+                    "type": "integer",
+                    "description": "Number of seconds until the alarm"
+                }
             },
-            "required": ["alarm"],
-        },
+            "required": ["alarm"]
+        }
     },
     {
         "name": "calculator",
-        "title": "Calculator tool",
-        "description": "Interpret expression element and return answer, using the bc calculator tool.",
+        "title": "Calculator",
+        "description": "Evaluate an expression using bc.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "expression": {"type": "string", "description": "provide expression to be computed"}
+                "expression": {
+                    "type": "string",
+                    "description": "Expression to evaluate"
+                }
             },
-            "required": ["expression"],
-        },
-    },
+            "required": ["expression"]
+        }
+    }
 ]
+
 
 def decode_header_value(value):
     if isinstance(value, str) and value.startswith("=?base64?") and value.endswith("?="):
         inner = value[len("=?base64?"):-len("?=")]
         try:
             return base64.b64decode(inner).decode("utf-8")
-        except Exception:
+        except (ValueError, UnicodeDecodeError):
             return value
     return value
- 
- 
+
+
 def origin_allowed(origin):
     if origin is None:
         return True
+
     if origin in (DEFAULT_ORIGINS | EXTRA_ORIGINS):
         return True
+
     for base in ("http://localhost:", "https://localhost:",
                  "http://127.0.0.1:", "https://127.0.0.1:"):
         if origin.startswith(base) and origin[len(base):].isdigit():
             return True
+
     return False
- 
- 
-def validate_meta(body):
-    """Required per-request _meta fields. -> 400 + -32602"""
-    meta = (body.get("params") or {}).get("_meta")
-    if not isinstance(meta, dict):
-        return "Missing params._meta"
-    if META_VERSION not in meta:
-        return f"Missing required _meta field: {META_VERSION}"
-    if META_CAPS not in meta:
-        return f"Missing required _meta field: {META_CAPS}"
-    return None
- 
- 
-def validate_headers(headers, body):
-    """Mirrored headers must match the body. -> 400 + -32020"""
+
+
+def validate_request(headers, body):
     params = body.get("params") or {}
-    meta = params.get("_meta") or {}
- 
-    hdr_version = headers.get("MCP-Protocol-Version")
-    if hdr_version is None:
-        return "Missing required header: MCP-Protocol-Version"
-    if hdr_version != meta.get(META_VERSION):
-        return (f"MCP-Protocol-Version header '{hdr_version}' does not match body value "
-                f"'{meta.get(META_VERSION)}'")
- 
-    hdr_method = headers.get("Mcp-Method")
-    if hdr_method is None:
-        return "Missing required header: Mcp-Method"
-    if hdr_method != body.get("method"):
-        return f"Mcp-Method header '{hdr_method}' does not match body method '{body.get('method')}'"
- 
+
+    if not isinstance(params, dict):
+        return -32602, "Invalid params"
+
+    meta = params.get("_meta")
+
+    if not isinstance(meta, dict):
+        return -32602, "Missing params._meta"
+
+    if META_VERSION not in meta or META_CAPS not in meta:
+        return -32602, "Missing required metadata"
+
+    version = meta[META_VERSION]
+
+    if headers.get("MCP-Protocol-Version") != version:
+        return -32020, "Protocol version header mismatch"
+
+    if headers.get("Mcp-Method") != body.get("method"):
+        return -32020, "Method header mismatch"
+
     if body.get("method") == "tools/call":
-        hdr_name = headers.get("Mcp-Name")
-        if hdr_name is None:
-            return "Missing required header: Mcp-Name"
-        if decode_header_value(hdr_name) != params.get("name"):
-            return f"Mcp-Name header '{hdr_name}' does not match body name '{params.get('name')}'"
- 
+        name = headers.get("Mcp-Name")
+
+        if name is None:
+            return -32020, "Missing Mcp-Name header"
+
+        if decode_header_value(name) != params.get("name"):
+            return -32020, "Tool name header mismatch"
+
+    if version != PROTOCOL_VERSION:
+        return -32022, "Unsupported protocol version"
+
     return None
- 
- 
-def validate_version(body):
-    requested = ((body.get("params") or {}).get("_meta") or {}).get(META_VERSION)
-    return None if requested == PROTOCOL_VERSION else requested
- 
+
+
+def tool_result(message, error=False):
+    return {
+        "resultType": "complete",
+        "content": [{"type": "text", "text": str(message)}],
+        "isError": error
+    }
+
 
 def today(args):
     form = args.get("format")
-    if not form or not isinstance(form, str) or not form.strip():
-        return {
-            "resultType": "complete",
-            "content": [{"type": "text", "text": "Require 'format' argument with type string"}],
-            "isError": True,
-        }
+
+    if not isinstance(form, str) or not form.strip():
+        return tool_result("Invalid format argument", True)
+
     try:
         res = datetime.date.today().strftime(form.strip())
-    except ValueError as e:
-        return {
-            "resultType": "complete",
-            "content": [{"type": "text", "text": f"The format string is not a valid format"}],
-            "isError": True,
-        }
-    return {
-        "resultType": "complete",
-        "content": [{"type": "text", "text": res}],
-        "isError": False,
-    }
+        return tool_result(res)
+    except ValueError:
+        return tool_result("Invalid date format", True)
 
 
 def weekday(args):
     date = args.get("date")
-    if not date or not isinstance(date, str) or not date.strip():
-        return {
-            "resultType": "complete",
-            "content": [{"type": "text", "text": "Require 'date' argument with type string"}],
-            "isError": True,
-        }
+
+    if not isinstance(date, str) or not date.strip():
+        return tool_result("Invalid date argument", True)
+
     try:
         res = datetime.date.fromisoformat(date.strip())
+        return tool_result(res.strftime("%A"))
     except ValueError:
-        return {
-            "resultType": "complete",
-            "content": [{"type": "text", "text": f"Could not parse '{date}' argument. Please use ISO 8601 format"}],
-            "isError": True,
-        }
-    return {
-        "resultType": "complete",
-        "content": [{"type": "text", "text": res.strftime("%A")}],
-        "isError": False,
-    }
+        return tool_result("Invalid date. Use YYYY-MM-DD", True)
 
 
 def calculator(args):
     expr = args.get("expression")
-    if not expr or not isinstance(expr, str) or not expr.strip() :
-        return {
-            "resultType": "complete",
-            "content": [{"type": "text", "text": "Require 'expression' argument with type string"}],
-            "isError": True,
-        }
+
+    if not isinstance(expr, str) or not expr.strip():
+        return tool_result("Invalid expression", True)
 
     try:
-        proc = subprocess.run(["bc", "-l"], input=expr.strip(), capture_output=True, text=True, timeout=10)
+        proc = subprocess.run(
+            ["bc", "-l"],
+            input=expr.strip() + "\n",
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
     except subprocess.TimeoutExpired:
-        return {
-            "resultType": "complete",
-            "content": [{"type": "text", "text": "Calculation timed out after 10 seconds."}],
-            "isError": True,
-        }
+        return tool_result("Calculation timed out", True)
+    except FileNotFoundError:
+        return tool_result("bc is not installed", True)
 
-    if proc.stderr.strip():
-        return {
-            "resultType": "complete",
-            "content": [{"type": "text", "text": f"bc error: {proc.stderr.strip()}"}],
-            "isError": True,
-        }
+    if proc.returncode != 0 or proc.stderr.strip():
+        return tool_result(proc.stderr.strip() or "Calculation failed", True)
 
     if not proc.stdout.strip():
-        return {
-            "resultType": "complete",
-            "content": [{"type": "text", "text": f"bc failed to provide an output to the expression"}],
-            "isError": True,
-        }
+        return tool_result("No output from bc", True)
 
-    return {
-        "resultType": "complete",
-        "content": [{"type": "text", "text": proc.stdout.strip()}],
-        "isError": False,
-    }
+    return tool_result(proc.stdout.strip())
+
 
 def timer(args):
     alarm = args.get("alarm")
 
-    if not isinstance(alarm, int) or alarm <= 0:
-        yield {
-            "resultType": "complete",
-            "content": [{"type": "text",
-                         "text": "Require 'alarm' argument as a positive integer number of seconds"}],
-            "isError": True,
-        }
+    if type(alarm) is not int or alarm <= 0:
+        yield tool_result("Alarm must be a positive integer", True)
         return
 
     elapsed = 0
+
     while elapsed + 10 < alarm:
         time.sleep(10)
         elapsed += 10
         yield {"progress": elapsed, "total": alarm}
 
     time.sleep(alarm - elapsed)
-    yield {
-        "resultType": "complete",
-        "content": [{"type": "text", "text": f"Time's up! {alarm} seconds elapsed."}],
-        "isError": False,
-    }
 
-HANDLERS = {"today": today, "weekday": weekday, "calculator": calculator}
+    yield tool_result(f"Time's up! {alarm} seconds elapsed.")
+
+
+HANDLERS = {
+    "today": today,
+    "weekday": weekday,
+    "calculator": calculator
+}
 
 
 class MCPHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
- 
+
     def send_json(self, obj, status=200):
         body = json.dumps(obj).encode()
+
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
- 
+
     def send_error_rpc(self, req_id, code, message, status, data=None):
         err = {"code": code, "message": message}
+
         if data is not None:
             err["data"] = data
-        self.send_json({"jsonrpc": "2.0", "id": req_id, "error": err}, status=status)
- 
+
+        self.send_json({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "error": err
+        }, status=status)
+
     def open_sse(self):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -276,13 +271,13 @@ class MCPHandler(BaseHTTPRequestHandler):
         self.send_header("X-Accel-Buffering", "no")
         self.send_header("Connection", "close")
         self.end_headers()
+
         self.close_connection = True
- 
+
     def send_sse(self, obj):
-        """One SSE event. The blank line ends it; the flush actually sends it."""
         self.wfile.write(f"data: {json.dumps(obj)}\n\n".encode())
         self.wfile.flush()
- 
+
     def do_GET(self):
         self.send_response(405)
         self.send_header("Content-Length", "0")
@@ -292,74 +287,96 @@ class MCPHandler(BaseHTTPRequestHandler):
         self.send_response(405)
         self.send_header("Content-Length", "0")
         self.end_headers()
- 
+
     def do_POST(self):
         if not origin_allowed(self.headers.get("Origin")):
-            return self.send_json(
-                {"jsonrpc": "2.0", "error": {"code": -32600, "message": "Origin not allowed"}},
-                status=403)
- 
+            return self.send_error_rpc(
+                None, -32600, "Origin not allowed", 403
+            )
+
         if self.path.split("?")[0] != ENDPOINT:
-            return self.send_error_rpc(None, -32601, "Not found", 404)
- 
-        length = int(self.headers.get("Content-Length", 0))
+            return self.send_error_rpc(
+                None, -32601, "Not found", 404
+            )
+
         try:
+            length = int(self.headers.get("Content-Length", 0))
             req = json.loads(self.rfile.read(length))
         except (json.JSONDecodeError, ValueError):
-            return self.send_error_rpc(None, -32700, "Parse error", 400)
- 
+            return self.send_error_rpc(
+                None, -32700, "Parse error", 400
+            )
+
+        if not isinstance(req, dict):
+            return self.send_error_rpc(
+                None, -32600, "Invalid request", 400
+            )
+
         req_id = req.get("id")
         method = req.get("method")
         params = req.get("params") or {}
- 
-        err = validate_meta(req)
-        if err:
-            return self.send_error_rpc(req_id, -32602, err, 400)
- 
-        err = validate_headers(self.headers, req)
-        if err:
-            return self.send_error_rpc(req_id, -32020, err, 400)
- 
-        bad_version = validate_version(req)
-        if bad_version is not None:
+
+        if not isinstance(params, dict):
             return self.send_error_rpc(
-                req_id, -32022, f"Unsupported protocol version: {bad_version}", 400,
-                data={"supported": [PROTOCOL_VERSION]})
- 
+                req_id, -32602, "Invalid params", 400
+            )
+
+        err = validate_request(self.headers, req)
+
+        if err:
+            code, message = err
+            return self.send_error_rpc(req_id, code, message, 400)
+
         if method == "server/discover":
             return self.send_json({
-                "jsonrpc": "2.0", "id": req_id,
+                "jsonrpc": "2.0",
+                "id": req_id,
                 "result": {
                     "resultType": "complete",
                     "supportedVersions": [PROTOCOL_VERSION],
                     "capabilities": {"tools": {}},
-                    "_meta": {"io.modelcontextprotocol/serverInfo": SERVER_INFO},
-                },
+                    "_meta": {
+                        "io.modelcontextprotocol/serverInfo": SERVER_INFO
+                    }
+                }
             })
- 
+
         if method == "tools/list":
             return self.send_json({
-                "jsonrpc": "2.0", "id": req_id,
+                "jsonrpc": "2.0",
+                "id": req_id,
                 "result": {
                     "resultType": "complete",
                     "tools": TOOLS,
                     "ttlMs": 300000,
-                    "cacheScope": "public",
-                },
+                    "cacheScope": "public"
+                }
             })
- 
+
         if method == "tools/call":
             name = params.get("name")
             args = params.get("arguments") or {}
- 
+
+            if not isinstance(args, dict):
+                return self.send_error_rpc(
+                    req_id, -32602, "Invalid tool arguments", 400
+                )
+
             if name == "timer":
                 token = (params.get("_meta") or {}).get("progressToken")
+
                 print(f"[timer] args={args} progressToken={token!r}", flush=True)
+
                 self.open_sse()
+
                 try:
                     for item in timer(args):
                         if "resultType" in item:
-                            self.send_sse({"jsonrpc": "2.0", "id": req_id, "result": item})
+                            self.send_sse({
+                                "jsonrpc": "2.0",
+                                "id": req_id,
+                                "result": item
+                            })
                         else:
                             self.send_sse({
                                 "jsonrpc": "2.0",
@@ -368,29 +385,35 @@ class MCPHandler(BaseHTTPRequestHandler):
                                     "progressToken": token,
                                     "progress": item["progress"],
                                     "total": item["total"],
-                                    "message": f"{item['progress']} of {item['total']} seconds elapsed",
-                                },
+                                    "message": f"{item['progress']} of {item['total']} seconds elapsed"
+                                }
                             })
+
                 except (BrokenPipeError, ConnectionResetError):
                     print("[timer] client disconnected", flush=True)
+
                 return
- 
+
             if name not in HANDLERS:
-                return self.send_error_rpc(req_id, -32602, f"Unknown tool: {name}", 404)
- 
+                return self.send_error_rpc(
+                    req_id, -32602, f"Unknown tool: {name}", 404
+                )
+
             return self.send_json({
-                "jsonrpc": "2.0", "id": req_id,
-                "result": HANDLERS[name](args),
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": HANDLERS[name](args)
             })
- 
-        return self.send_error_rpc(req_id, -32601, f"Method not found: {method}", 404)
- 
+
+        return self.send_error_rpc(
+            req_id, -32601, f"Method not found: {method}", 404
+        )
+
     def log_message(self, fmt, *a):
         print(f"{self.address_string()} {fmt % a}", flush=True)
- 
- 
+
+
 if __name__ == "__main__":
     server = ThreadingHTTPServer((HOST, PORT), MCPHandler)
     print(f"MCP server on http://{HOST}:{PORT}{ENDPOINT}", flush=True)
     server.serve_forever()
- 

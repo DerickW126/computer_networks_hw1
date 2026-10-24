@@ -147,7 +147,7 @@ def validate_request(headers, body):
             return -32020, "Tool name header mismatch"
 
     if version != PROTOCOL_VERSION:
-        return -32022, "Unsupported protocol version"
+        return -32022, f"Unsupported protocol version: {version}"
 
     return None
 
@@ -325,7 +325,8 @@ class MCPHandler(BaseHTTPRequestHandler):
 
         if err:
             code, message = err
-            return self.send_error_rpc(req_id, code, message, 400)
+            data = {"supported": [PROTOCOL_VERSION]} if code == -32022 else None
+            return self.send_error_rpc(req_id, code, message, 400, data)
 
         if method == "server/discover":
             return self.send_json({
